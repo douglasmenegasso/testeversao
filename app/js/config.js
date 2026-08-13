@@ -1,0 +1,385 @@
+// ============ CONFIGURAÇÕES GLOBAIS ============
+
+// Supabase
+var SUPABASE_URL = 'https://xwwklngrkvdwgiinycvt.supabase.co';
+var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh3d2tsbmdya3Zkd2dpaW55Y3Z0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NDYwODUsImV4cCI6MjA5NjAyMjA4NX0.XhnNESlgV4Q_kkXRYh4QY2e9RBG-u-qgP9sDHyKfEG4';
+
+// Edge Functions
+var SUPABASE_EDGE_URL = 'https://xwwklngrkvdwgiinycvt.supabase.co/functions/v1';
+
+// Versão do App
+var appVersion = '5.4.2';
+
+// Configurações do App
+var APP_CONFIG = {
+    nome: 'Kayla',
+    descricao: 'Sistema de Venda Consignada',
+    cor: '#7c5cfc',
+    suporte: 'https://wa.me/5541996427444'
+};
+
+// Variáveis globais
+var currentUser = null;
+var supabaseClient = null;
+var clientes = [];
+var produtos = [];
+var vendas = [];
+var pedidos = [];
+var configEmpresa = {};
+var isOnline = navigator.onLine;
+
+// Inicializar Supabase Client
+function inicializarSupabase() {
+    if (typeof supabase !== 'undefined') {
+        supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        console.log('[Config] Supabase inicializado');
+        
+        // Listener de autenticação em tempo real para sincronizar múltiplos dispositivos
+        supabaseClient.auth.onAuthStateChange(function(event, session) {
+            console.log('[AUTH] Evento:', event);
+            if (event === 'SIGNED_OUT' || event === 'USER_DELETED') {
+                // Se o usuário foi deslogado ou deletado em outro lugar, limpa tudo e recarrega
+                if (typeof currentUser !== 'undefined' && currentUser) {
+                    console.warn('[AUTH] Sessão encerrada remotamente. Limpando dados...');
+                    localStorage.clear();
+                    window.location.reload();
+                }
+            }
+        });
+        
+        // Inicializar sessão após Supabase estar pronto
+        if (typeof verificarSessao === 'function') {
+            verificarSessao();
+        }
+        return true;
+    }
+    return false;
+}
+
+// Inicializar ao carregar
+if (typeof window !== 'undefined') {
+    window.addEventListener('load', function() {
+        // Garantir que isOnline esteja correto no boot
+        if (typeof verificarConexao === 'function') {
+            verificarConexao();
+        }
+        setTimeout(inicializarSupabase, 100);
+    });
+    
+    // Listeners de conexão
+    window.addEventListener('online', function() { if (typeof verificarConexao === 'function') verificarConexao(); });
+    window.addEventListener('offline', function() { if (typeof verificarConexao === 'function') verificarConexao(); });
+}
+
+// ====================================================================
+// 🆕 FUNÇÕES DE GERENCIAMENTO DE DISPOSITIVOS
+// ====================================================================
+
+async function listarDispositivosAtivos() {
+    if (!currentUser) return [];
+    try {
+        var result = await supabaseClient.from('assinaturas').select('id').eq('user_id', currentUser.id).eq('status', 'ativa').limit(1).maybeSingle();
+        if (result.error || !result.data) return [];
+        var { data } = await supabaseClient.from('dispositivos').select('*').eq('assinatura_id', result.data.id).eq('ativo', true).order('ultimo_acesso', { ascending: false });
+        return data || [];
+    } catch(e) { return []; }
+}
+
+async function desativarDispositivo(deviceId) {
+    if (typeof removerDispositivo !== 'function') {
+        toast('Gerenciamento de dispositivos indisponível', 'error');
+        return false;
+    }
+    return removerDispositivo(deviceId);
+}
+
+async function ativarDispositivoAtual() {
+    if (!currentUser) return false;
+    try {
+        if (typeof registrarDispositivoAtual === 'function') {
+            var ok = await registrarDispositivoAtual();
+            if (ok) {
+                if (typeof verificarStatusPro === 'function') await verificarStatusPro();
+                
+                if (typeof gerenciarDispositivos === 'function') {
+                    await gerenciarDispositivos();
+                }
+                
+                if (typeof mudarAba === 'function' && document.querySelector('.nav-btn:nth-child(6).active')) {
+                    var content = document.getElementById('content');
+                    if (content) content.innerHTML = renderizarConfig();
+                }
+                
+                toast('✅ Dispositivo ativado!', 'success');
+                return true;
+            }
+        }
+        toast('❌ Sem vagas. Remova um dispositivo primeiro.', 'error');
+        return false;
+    } catch(e) { return false; }
+}
+
+async function gerarHtmlListaDispositivos() {
+    var dispositivos = await listarDispositivosAtivos();
+    var assinatura = await getAssinaturaAtiva();
+    
+    var html = ''; 
+    
+    if (!assinatura) {
+        html += '<div style="text-align:center; padding:20px; color:var(--text2);">Nenhuma assinatura PRO ativa.</div>';
+        return html;
+    }
+
+    var currentDeviceId = getDeviceId();
+    // O dispositivo atual está ativo se o ID bater E o app localmente estiver no modo PRO
+    var isMeActive = dispositivos.some(function(d) { 
+        return d.device_id === currentDeviceId && window.LIMITES && LIMITES.proAtivo; 
+    });
+
+    html += '<div style="text-align:center; margin-bottom:15px; font-weight:600; color:var(--accent);">' + dispositivos.length + ' de ' + assinatura.dispositivos_max + ' dispositivos em uso</div>';
+
+    if (dispositivos.length === 0) {
+        html += '<div style="text-align:center; padding:20px; color:var(--text2);">Nenhum dispositivo ativo no momento.</div>';
+    } else {
+        html += '<div class="item-list">';
+        for (var i = 0; i < dispositivos.length; i++) {
+            var d = dispositivos[i];
+            var isMe = d.device_id === currentDeviceId && window.LIMITES && LIMITES.proAtivo;
+            var dataAcesso = new Date(d.ultimo_acesso).toLocaleString('pt-BR');
+            var borderStyle = isMe ? 'border:2px solid var(--success); background:rgba(34, 197, 94, 0.05);' : 'border:1px solid var(--border-color);';
+            
+            html += `
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border-radius:10px; margin-bottom:8px; ${borderStyle}">
+                    <div style="flex:1">
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px">
+                            <strong style="color:${isMe ? 'var(--success)' : 'var(--text1)'}">${d.device_name || 'Dispositivo'}</strong>
+                            ${isMe ? '<span style="background:var(--success); color:#fff; font-size:9px; padding:1px 6px; border-radius:10px; font-weight:800">PRO ATIVO AQUI</span>' : '<span style="background:var(--accent); color:#fff; font-size:9px; padding:1px 6px; border-radius:10px; font-weight:800">LICENÇA EM USO</span>'}
+                        </div>
+                        <small style="color:var(--text2); font-size:11px;">${d.device_type === 'mobile' ? '📱' : '💻'} ${d.device_type || 'desktop'} • Acesso: ${dataAcesso}</small>
+                    </div>
+                    <button class="btn btn-outline btn-sm" style="padding:4px 10px; font-size:11px; border-color:var(--danger); color:var(--danger)" onclick="desativarDispositivo('${d.id}')">
+                        Liberar
+                    </button>
+                </div>
+            `;
+        }
+        html += '</div>';
+    }
+
+    // Se eu não estou ativo e tem vaga, mostra o botão de ativação
+    if (!isMeActive && dispositivos.length < assinatura.dispositivos_max) {
+        html += `
+            <div style="margin-top:15px; padding:15px; text-align:center; background:var(--bg3); border-radius:10px; border:1px dashed var(--accent);">
+                <p style="margin-bottom:10px; color:var(--text2); font-size:13px;">
+                    Este dispositivo está operando no modo <strong>GRÁTIS</strong>.
+                </p>
+                <button class="btn btn-primary" onclick="ativarDispositivoAtual()" style="width:100%;">
+                    ⚡ Ativar PRO neste dispositivo
+                </button>
+            </div>
+        `;
+    } else if (!isMeActive && dispositivos.length >= assinatura.dispositivos_max) {
+        html += `
+            <div style="margin-top:15px; padding:12px; text-align:center; background:rgba(255, 152, 0, 0.1); border-radius:10px; color:var(--warning); font-size:12px;">
+                ⚠️ Limite atingido. Liberte uma vaga para ativar este dispositivo.
+            </div>
+        `;
+    }
+
+    return html;
+}
+
+// ====================================================================
+// 🏢 DADOS DA EMPRESA (editar / salvar / carregar) — LOGO + NUVEM (final)
+// ====================================================================
+if (typeof window.comprimirImagem !== 'function') {
+  window.comprimirImagem = function(file, maxWidth, maxHeight, quality, callback) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var img = new Image();
+      img.onload = function() {
+        var canvas = document.createElement('canvas');
+        var width = img.width, height = img.height;
+        if (width > maxWidth) { height = Math.round(height * maxWidth / width); width = maxWidth; }
+        if (height > maxHeight) { width = Math.round(width * maxHeight / height); height = maxHeight; }
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        callback(canvas.toDataURL('image/png', quality));
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+}
+if (typeof window.salvarEmpresaSupabase !== 'function') {
+  window.salvarEmpresaSupabase = async function(dados) {
+    if (!currentUser || !supabaseClient) return false;
+    try {
+      var userId = currentUser.id;
+      var payload = { nome: dados.nome||'', cnpj: dados.cnpj||'', endereco: dados.endereco||'', telefone: dados.telefone||'', logo: dados.logo||'', updated_at: new Date().toISOString() };
+      var { data: existente } = await supabaseClient.from('empresa').select('id').eq('user_id', userId).maybeSingle();
+      if (existente) {
+        await supabaseClient.from('empresa').update(payload).eq('user_id', userId);
+      } else {
+        payload.user_id = userId;
+        await supabaseClient.from('empresa').insert(payload);
+      }
+      return true;
+    } catch(e) { console.error('[Empresa] Erro Supabase:', e); return false; }
+  };
+}
+if (typeof window.carregarEmpresaSupabase !== 'function') {
+  window.carregarEmpresaSupabase = async function() {
+    if (!currentUser || !supabaseClient) return null;
+    try {
+      var { data } = await supabaseClient.from('empresa').select('*').eq('user_id', currentUser.id).maybeSingle();
+      return data;
+    } catch(e) { console.error('[Empresa] Erro load Supabase:', e); return null; }
+  };
+}
+
+function carregarConfigEmpresa() {
+  if (currentUser && currentUser.id) {
+    try {
+      var salvo = localStorage.getItem('kayla_empresa_' + currentUser.id);
+      if (salvo) configEmpresa = JSON.parse(salvo) || {};
+    } catch(e) { configEmpresa = configEmpresa || {}; }
+  }
+  if (currentUser && supabaseClient && typeof carregarEmpresaSupabase === 'function') {
+    carregarEmpresaSupabase().then(function(dados) {
+      if (dados) {
+        configEmpresa = { nome: dados.nome||'', cnpj: dados.cnpj||'', endereco: dados.endereco||'', telefone: dados.telefone||'', logo: dados.logo||'' };
+        try { localStorage.setItem('kayla_empresa_' + currentUser.id, JSON.stringify(configEmpresa)); } catch(e){}
+        try {
+          if (document.querySelector('.nav-btn:nth-child(6).active') && typeof renderizarConfig === 'function') {
+            var c = document.getElementById('content'); if (c) c.innerHTML = renderizarConfig();
+          }
+        } catch(e){}
+      }
+    }).catch(function(){});
+  }
+}
+
+function editarEmpresa() {
+  carregarConfigEmpresa();
+  var esc = function(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;'); };
+  var html = '<div class="modal-handle"></div>';
+  html += '<div class="modal-title">🏢 Dados da Empresa</div>';
+  html += '<div class="modal-sub">Esses dados e a logo ficam na nuvem (aparecem em qualquer aparelho e no PDF)</div>';
+  html += '<div class="form-group"><label class="form-label">📷 Logotipo da Empresa</label>';
+    if (configEmpresa.logo) {
+    html += '<div style="margin-bottom:8px"><img id="emp-logo-preview" src="' + configEmpresa.logo + '" style="max-width:200px;max-height:100px;border-radius:8px;border:2px solid var(--bg2);background:#fff"></div>';
+  }
+  html += '<div style="font-size:11px;color:var(--text2);margin-bottom:8px">PNG ou JPG • é comprimida automaticamente</div>';
+  html += '<input type="file" id="emp-logo" accept="image/*" onchange="uploadLogoEmpresa()">';
+  html += '</div>';
+  html += '<div class="form-group"><label class="form-label">📛 Nome / Razão Social</label><input class="form-input" id="emp-nome" value="' + esc(configEmpresa.nome) + '" placeholder="Ex: Minha Empresa"></div>';
+  html += '<div class="form-group"><label class="form-label">🆔 CNPJ / CPF</label><input class="form-input" id="emp-cnpj" value="' + esc(configEmpresa.cnpj) + '" placeholder="00.000.000/0000-00"></div>';
+  html += '<div class="form-group"><label class="form-label">📍 Endereço</label><input class="form-input" id="emp-endereco" value="' + esc(configEmpresa.endereco) + '" placeholder="Rua, número, cidade - UF"></div>';
+  html += '<div class="form-group"><label class="form-label">📞 Telefone</label><input class="form-input" id="emp-telefone" value="' + esc(configEmpresa.telefone) + '" placeholder="(00) 00000-0000"></div>';
+  html += '<button class="btn btn-primary" onclick="salvarEmpresa()">💾 Salvar na Nuvem</button>';
+  html += '<button class="btn btn-outline" onclick="fecharModal()">Cancelar</button>';
+  document.getElementById('modal-body').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('show');
+  setTimeout(function(){ var el = document.getElementById('emp-nome'); if (el) el.focus(); }, 100);
+}
+
+function uploadLogoEmpresa() {
+  var input = document.getElementById('emp-logo');
+  if (!input) return;
+  var file = input.files[0];
+  if (!file) return;
+  if (typeof comprimirImagem !== 'function') { toast('Recarregue a página (Ctrl+F5) e tente de novo.', 'error'); input.value=''; return; }
+  if (!file.type.startsWith('image/')) { toast('Apenas imagens são aceitas', 'error'); input.value=''; return; }
+  if (file.size > 5*1024*1024) { toast('Imagem muito grande. Máximo 5MB', 'error'); input.value=''; return; }
+    comprimirImagem(file, 400, 200, 0.8, function(dataUrl) {
+    configEmpresa.logo = dataUrl;
+    var preview = document.getElementById('emp-logo-preview');
+    if (preview) {
+      preview.src = dataUrl;
+    } else {
+      var logoInput = document.getElementById('emp-logo');
+      if (logoInput) {
+        var div = document.createElement('div');
+        div.style.marginBottom = '8px';
+        div.innerHTML = '<img id="emp-logo-preview" src="' + dataUrl + '" style="max-width:200px;max-height:100px;border-radius:8px;border:2px solid var(--bg2);background:#fff">';
+        logoInput.parentNode.insertBefore(div, logoInput);
+      }
+    }
+    toast('✅ Logo carregada! Agora clique em "Salvar na Nuvem".', 'success');
+  });
+}
+
+async function salvarEmpresa() {
+  if (!currentUser || !currentUser.id) { toast('Faça login primeiro', 'error'); return; }
+  var g = function(id){ var el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  var logoAtual = configEmpresa.logo || '';
+  configEmpresa = { nome: g('emp-nome'), cnpj: g('emp-cnpj'), endereco: g('emp-endereco'), telefone: g('emp-telefone'), logo: logoAtual };
+  var ok = false;
+  if (typeof salvarEmpresaSupabase === 'function') { ok = await salvarEmpresaSupabase(configEmpresa); }
+  try { localStorage.setItem('kayla_empresa_' + currentUser.id, JSON.stringify(configEmpresa)); } catch(e){}
+  if (ok) toast('✅ Dados + logo salvos na nuvem!', 'success');
+  else toast('⚠️ Salvo só neste aparelho (sem internet)', 'warning');
+  fecharModal();
+  if (typeof mudarAba === 'function') mudarAba('settings');
+}
+
+window.carregarConfigEmpresa = carregarConfigEmpresa;
+window.editarEmpresa = editarEmpresa;
+window.salvarEmpresa = salvarEmpresa;
+window.uploadLogoEmpresa = uploadLogoEmpresa;
+
+// ====================================================================
+// 🔔 ALERTA DE INATIVIDADE (chama o "carteiro" checar-saude)
+//    Só lê o último pedido e manda 1 e-mail. Não mexe em pagamento/ativação.
+// ====================================================================
+async function checarAlertaInatividade(forcar) {
+  try {
+    if (!currentUser || !supabaseClient || !isOnline) return; // sem login/offline: não faz nada
+    var userId = currentUser.id;
+    var hoje = new Date().toDateString();
+    var chave = 'kayla_alert_chk_' + userId;
+
+    if (!forcar && localStorage.getItem(chave) === hoje) return; // já checou hoje
+
+    var r = await supabaseClient.from('pedidos').select('created_at').order('created_at', { ascending: false }).limit(1).maybeSingle();
+    var ultimo = (r && r.data) ? r.data.created_at : null;
+
+    var dias = 0, dataLegivel = '(sem vendas)';
+    if (ultimo) {
+      var d = new Date(ultimo);
+      dias = Math.floor((Date.now() - d.getTime()) / 86400000);
+      dataLegivel = d.toLocaleDateString('pt-BR');
+    } else if (!forcar) {
+      localStorage.setItem(chave, hoje);           // sem vendas = implantação: não alerta
+      console.log('[Alerta] Sem vendas ainda (sem alerta).');
+      return;
+    }
+
+    var LIMITE = 5;
+    if (!forcar && dias < LIMITE) {
+      localStorage.setItem(chave, hoje);           // venda recente: tudo certo
+      console.log('[Alerta] Última venda há ' + dias + ' dia(s). Tudo certo.');
+      return;
+    }
+
+    console.log('[Alerta] Disparando e-mail (dias=' + dias + ', forcar=' + !!forcar + ')');
+    var resp = await fetch(SUPABASE_EDGE_URL + '/checar-saude', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_KEY },
+      body: JSON.stringify({ dias: dias, data_legivel: dataLegivel })
+    });
+    var json = {}; try { json = await resp.json(); } catch (e) {}
+    console.log('[Alerta] Resposta do carteiro:', json);
+
+    if (!forcar) localStorage.setItem(chave, hoje);
+  } catch (e) {
+    console.warn('[Alerta] Erro ignorado (não afeta o app):', e);
+  }
+}
+window.checarAlertaInatividade = checarAlertaInatividade;
+setInterval(function () { checarAlertaInatividade(); }, 30000); // pulso a cada 30s (trabalho real 1x/dia)
+
+
+console.log('[Config] Kayla v' + appVersion + ' - Configurações carregadas');
+

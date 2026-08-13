@@ -1,0 +1,164 @@
+// ============ CLIENTES ============
+
+function renderizarClientes() {
+    var html = '<div class="card"><div class="card-title">👥 Clientes (' + clientes.length + ')</div>';
+    html += '<div class="form-group" style="margin-bottom:12px"><input class="form-input" id="busca-clientes" placeholder="🔍 Buscar por nome ou telefone" oninput="filtrarClientes(this.value)"></div>';
+    if (!LIMITES.proAtivo && clientes.length >= (LIMITES.maxClientes || LIMITES.freeClientes || 3)) {
+        html += '<div class="limit-warning">⚠️ Limite atingido!</div>';
+    }
+    html += '<button class="btn btn-primary" onclick="adicionarClienteComVerificacao()">+ Novo Cliente</button></div>';
+    if (clientes.length === 0) {
+        html += '<div class="card"><div class="empty-state">Nenhum cliente</div></div>';
+    } else {
+        html += '<div class="item-list" id="lista-clientes">';
+        html += renderizarListaClientes(clientes);
+        html += '</div>';
+    }
+    return html;
+}
+
+function renderizarListaClientes(lista) {
+    if (lista.length === 0) return '<div class="empty-state">Nenhum cliente encontrado</div>';
+    var html = '';
+    lista.forEach(function(c) {
+        var clienteId = escapeAttribute(c.id);
+        html += '<div class="item-card"><div class="item-info"><div class="item-name">' + escapeHtml(c.nome) + '</div><div class="item-detail">' + escapeHtml(c.telefone || 'Sem tel') + '</div></div>';
+        html += '<div style="display:flex;gap:8px">';
+        html += '<button class="btn btn-sm btn-primary" data-cliente-id="' + clienteId + '" onclick="iniciarPedidoCliente(this.dataset.clienteId)">🛒 Vender</button>';
+        html += '<button class="btn btn-sm btn-outline" data-cliente-id="' + clienteId + '" onclick="editarCliente(this.dataset.clienteId)">✏️</button>';
+        html += '<button class="btn btn-sm btn-red" data-cliente-id="' + clienteId + '" onclick="excluirCliente(this.dataset.clienteId)">🗑️</button>';
+        html += '</div></div>';
+    });
+    return html;
+}
+
+function filtrarClientes(valor) {
+    var v = (valor || '').toLowerCase().trim();
+    var lista = clientes.filter(function(c) {
+        if (!v) return true;
+        return (c.nome || '').toLowerCase().indexOf(v) >= 0 || (c.telefone || '').toLowerCase().indexOf(v) >= 0;
+    });
+    var cont = document.getElementById('lista-clientes');
+    if (cont) cont.innerHTML = renderizarListaClientes(lista);
+}
+window.filtrarClientes = filtrarClientes;
+
+// ✅ NOVA FUNÇÃO: Verifica limite e mostra modal de planos se necessário
+function adicionarClienteComVerificacao() {
+    // 🚫 Bloqueio por dispositivo
+    if (LIMITES.bloqueadoPorDispositivo) {
+        toast('🔒 Ação bloqueada. Limite de dispositivos atingido. Libere um dispositivo nas Configurações.', 'error');
+        return;
+    }
+
+    var maxClientes = LIMITES.maxClientes || LIMITES.freeClientes || 3;
+    
+    if (!LIMITES.proAtivo && clientes.length >= maxClientes) {
+        toast('🔒 Limite do plano FREE atingido! (' + maxClientes + ' clientes)', 'error');
+        setTimeout(function() {
+            mostrarPlanos(); 
+        }, 1000);
+        return;
+    }
+    
+    abrirModalCliente();
+}
+
+function abrirModalCliente(clienteId) {
+if (!verificarLimite('clientes')) return;
+	var cliente = clienteId ? clientes.find(function(c) { return c.id === clienteId; }) : null;
+    var idSeguro = cliente ? escapeAttribute(cliente.id) : '';
+	var html = '<div class="modal-handle"></div>';
+	html += '<div class="modal-title">' + (cliente ? '✏️ Editar Cliente' : '👥 Cadastrar Cliente') + '</div>';
+	html += '<div class="form-group"><label class="form-label">Nome *</label><input class="form-input" id="cliente-nome" value="' + escapeAttribute(cliente ? cliente.nome : '') + '"></div>';
+	html += '<div class="form-group"><label class="form-label">Telefone</label><input class="form-input" id="cliente-telefone" value="' + escapeAttribute(cliente ? cliente.telefone || '' : '') + '"></div>';
+	html += '<div class="form-group"><label class="form-label">Endereço</label><input class="form-input" id="cliente-endereco" value="' + escapeAttribute(cliente ? cliente.endereco || '' : '') + '"></div>';
+	html += '<button class="btn btn-primary" data-cliente-id="' + idSeguro + '" onclick="salvarCliente(this.dataset.clienteId)">💾 Salvar</button>';
+
+html += '<button class="btn btn-outline" onclick="fecharModal()">Cancelar</button>';
+document.getElementById('modal-body').innerHTML = html;
+document.getElementById('modal-overlay').classList.add('show');
+setTimeout(function() { document.getElementById('cliente-nome').focus(); }, 100);
+}
+
+function editarCliente(clienteId) {
+    // 🚫 Bloqueio por dispositivo
+    if (LIMITES.bloqueadoPorDispositivo) {
+        toast('🔒 Ação bloqueada. Limite de dispositivos atingido. Libere um dispositivo nas Configurações.', 'error');
+        return;
+    }
+    abrirModalCliente(clienteId);
+}
+
+async function excluirCliente(clienteId) {
+    // 🚫 Bloqueio por dispositivo
+    if (LIMITES.bloqueadoPorDispositivo) {
+        toast('🔒 Ação bloqueada. Limite de dispositivos atingido. Libere um dispositivo nas Configurações.', 'error');
+        return;
+    }
+
+    if (!confirm('Tem certeza que deseja excluir este cliente?')) return;
+    
+    if (isOnline && supabaseClient) {
+        var result = await supabaseClient.from('clientes').delete().eq('id', clienteId);
+        if (result.error) { toast('Erro: ' + result.error.message, 'error'); return; }
+        await carregarDados();
+    } else {
+        clientes = clientes.filter(function(c) { return c.id !== clienteId; });
+        salvarDadosLocais();
+    }
+    
+    toast('✅ Cliente excluído!', 'success');
+    mudarAba('clients');
+}
+
+async function salvarCliente(clienteId) {
+    // 🚫 Bloqueio por dispositivo
+    if (LIMITES.bloqueadoPorDispositivo) {
+        toast('🔒 Ação bloqueada. Limite de dispositivos atingido. Libere um dispositivo nas Configurações.', 'error');
+        return;
+    }
+
+    var nome = document.getElementById('cliente-nome').value.trim();
+    if (!nome) { toast('Nome obrigatório', 'error'); return; }
+    
+    var clienteData = { 
+        nome: nome, 
+        telefone: document.getElementById('cliente-telefone').value.trim(), 
+        endereco: document.getElementById('cliente-endereco').value.trim(),
+        user_id: currentUser ? currentUser.id : 'local'
+    };
+    
+    if (clienteId) {
+        if (isOnline && supabaseClient) {
+            var result = await supabaseClient.from('clientes').update(clienteData).eq('id', clienteId);
+            if (result.error) { toast('Erro: ' + result.error.message, 'error'); return; }
+            await carregarDados();
+        } else {
+            var idx = clientes.findIndex(function(c) { return c.id === clienteId; });
+            if (idx >= 0) {
+                clientes[idx] = Object.assign({}, clientes[idx], clienteData);
+                salvarDadosLocais();
+            }
+        }
+        toast('✅ Cliente atualizado!', 'success');
+    } else {
+        if (!verificarLimite('clientes')) return;
+        clienteData.created_at = new Date().toISOString();
+        if (isOnline && supabaseClient) {
+            var result = await supabaseClient.from('clientes').insert(clienteData).select();
+            if (result.error) { toast('Erro: ' + result.error.message, 'error'); return; }
+            await carregarDados();
+        } else {
+            clienteData.id = 'local_' + Date.now();
+            clientes.push(clienteData);
+            salvarDadosLocais();
+        }
+        toast('✅ Cliente cadastrado!', 'success');
+    }
+    
+    fecharModal();
+    mudarAba('clients');
+}
+
+console.log('✅ Clients.js carregado (Modo Somente Leitura Ativo)');

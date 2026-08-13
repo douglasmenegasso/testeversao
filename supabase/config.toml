@@ -1,0 +1,13 @@
+# Configuração mínima para deploy das Edge Functions do Kayla.
+# Os segredos nunca devem ser incluídos neste arquivo ou no Git.
+
+[functions.criar-pagamento-seguro]
+verify_jwt = true
+
+[functions.gerenciar-assinatura]
+verify_jwt = true
+
+
+[functions.webhook-mp]
+# Mercado Pago não possui JWT do Supabase; a origem é validada via x-signature.
+verify_jwt = false

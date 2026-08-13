@@ -1,0 +1,534 @@
+// ============ AUTENTICAÇÃO ============
+
+function mostrarTelaSelecao() {
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+}
+
+function abrirLogin() {
+    var html = '<div class="modal-handle"></div>';
+    html += '<div class="modal-title">🔐 Login</div>';
+    html += '<div class="modal-sub">Digite suas credenciais</div>';
+    html += '<div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="email" type="email" placeholder="seu@email.com" onkeypress="if(event.key===\'Enter\'){event.preventDefault();fazerLogin();}"></div>';
+    html += '<div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="senha" type="password" placeholder="Mínimo 6 caracteres" onkeypress="if(event.key===\'Enter\'){event.preventDefault();fazerLogin();}"></div>';
+    html += '<div class="checkbox-group"><input type="checkbox" id="lembrar-me"><label for="lembrar-me" style="color:var(--text2);font-size:13px">Lembrar de mim</label></div>';
+    html += '<div style="text-align:right;margin-bottom:12px"><button class="btn btn-sm btn-outline" onclick="recuperarSenha()" style="width:auto;padding:6px 12px;font-size:11px">🔑 Esqueci a senha</button></div>';
+    html += '<button id="btn-fazer-login" class="btn btn-primary" onclick="fazerLogin()">Entrar</button>';
+    html += '<button class="btn btn-outline" onclick="fecharModal()">Cancelar</button>';
+    document.getElementById('modal-body').innerHTML = html;
+    document.getElementById('modal-overlay').classList.add('show');
+    setTimeout(function() { document.getElementById('email').focus(); }, 100);
+}
+
+function abrirCadastro() {
+    var html = '<div class="modal-handle"></div>';
+    html += '<div class="modal-title">📝 Criar Conta</div>';
+    html += '<div class="modal-sub">Preencha seus dados</div>';
+    html += '<div class="form-group"><label class="form-label">Nome</label><input class="form-input" id="cadastro-nome" placeholder="Seu nome"></div>';
+    html += '<div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="cadastro-email" type="email" placeholder="seu@email.com"></div>';
+    html += '<div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="cadastro-senha" type="password" placeholder="Mínimo 6 caracteres"></div>';
+    html += '<div class="form-group"><label class="form-label">Confirmar Senha</label><input class="form-input" id="cadastro-senha2" type="password" placeholder="Repita a senha"></div>';
+    html += '<button class="btn btn-primary" onclick="fazerCadastro()">Cadastrar</button>';
+    html += '<button class="btn btn-outline" onclick="abrirLogin()">Já tenho conta</button>';
+    html += '<button class="btn btn-outline" onclick="mostrarTelaSelecao()">Voltar</button>';
+    document.getElementById('modal-body').innerHTML = html;
+    document.getElementById('modal-overlay').classList.add('show');
+}
+
+async function verificarSessao() {
+    var lembrarMe = localStorage.getItem('kayla_lembrar_me');
+    
+    if (lembrarMe === 'true') {
+        var emailSalvo = localStorage.getItem('kayla_email');
+        var userSalvo = localStorage.getItem('kayla_user');
+        
+        if (userSalvo) {
+            try {
+                currentUser = JSON.parse(userSalvo);
+            } catch(e) {
+                currentUser = { email: emailSalvo, id: 'local' };
+            }
+            
+            if (isOnline && supabaseClient) {
+                try {
+                    await carregarDados();
+                    await verificarStatusPro();
+                    
+                    // NÃO registra o dispositivo automaticamente ao restaurar sessão
+                    // O usuário deve ativar manualmente via botão
+                    
+                    // ✅ NOVO: Verificar se voltou de um pagamento
+                    if (typeof verificarRetornoPagamento === 'function') {
+                        verificarRetornoPagamento();
+                    }
+                } catch(e) {
+                    console.warn('Falha ao sincronizar, usando dados locais');
+                }
+            } else {
+                carregarDadosLocais();
+            }
+            
+            mostrarApp();
+            return;
+        }
+    }
+    
+    mostrarTelaSelecao();
+}
+
+
+async function fazerLogin() {
+    var email = document.getElementById('email').value.trim();
+    var senha = document.getElementById('senha').value;
+    var lembrarMe = document.getElementById('lembrar-me').checked;
+    
+    if (!email || !senha) { 
+        toast('Preencha e-mail e senha', 'error'); 
+        return; 
+    }
+    
+    // Encontra o botão de forma mais confiável
+    var btn = document.querySelector('.modal-content button[onclick="fazerLogin()"]');
+    if (!btn) {
+        btn = document.querySelector('button[onclick="fazerLogin()"]');
+    }
+    if (btn && btn.disabled) return;
+    
+    var textoOriginal = btn ? btn.innerText : 'Entrar';
+    if (btn) {
+        btn.innerText = 'Entrando...';
+        btn.disabled = true;
+    }
+    
+    console.log('[AUTH] Tentando login - Email:', email, 'Online:', isOnline);
+    
+    // OFFLINE: Primeiro verifica se tem sessão salva
+    // Migração de segurança: versões anteriores guardavam a senha codificada
+    // em Base64. Esse valor é reversível e não deve permanecer no dispositivo.
+    localStorage.removeItem('kayla_senha_hash');
+
+    if (!isOnline) {
+        toast('Sem conexão. Entre online uma vez para autenticar sua sessão.', 'warning');
+        if (btn) { btn.innerText = textoOriginal; btn.disabled = false; }
+        return;
+    }
+    
+    // ONLINE: Tenta login no Supabase
+    if (supabaseClient && isOnline) {
+        console.log('[AUTH] Login ONLINE via Supabase');
+        try {
+            var result = await supabaseClient.auth.signInWithPassword({ 
+                email: email, 
+                password: senha 
+            });
+            console.log('[AUTH] Resultado Supabase:', result);
+            
+            if (result.error) {
+                var errorMsg = result.error.message || 'Erro desconhecido';
+                
+                // ✅ NOVO: Detecta quando o email não existe ou senha está errada
+                if (errorMsg.toLowerCase().includes('invalid login credentials') || 
+                    errorMsg.toLowerCase().includes('bad request')) {
+                    
+                    // Pergunta se o usuário quer criar uma conta
+                    confirmar(
+                        'E-mail não encontrado', 
+                        'O e-mail "' + email + '" não está cadastrado no sistema.\n\nDeseja criar uma nova conta com este e-mail?', 
+                        function(querCriar) {
+                            if (querCriar) {
+                                // Abre o modal de cadastro com o email preenchido
+                                abrirCadastroComEmail(email);
+                            }
+                        }
+                    );
+                } else if (errorMsg.toLowerCase().includes('email not confirmed')) {
+                    toast('Confirme seu e-mail antes de entrar', 'warning');
+                } else {
+                    toast('Erro: ' + errorMsg, 'error');
+                }
+                
+                console.error('[AUTH] Erro login:', result.error);
+                if (btn) { btn.innerText = textoOriginal; btn.disabled = false; }
+                return;
+            }
+            
+            // Login online sucesso
+            if (result.data && result.data.user) {
+                await loginSucesso(result.data.user, senha, lembrarMe);
+            } else {
+                toast('Erro ao fazer login', 'error');
+            }
+        } catch(error) {
+            console.error('[AUTH] Exceção no login:', error);
+            toast('Erro de conexão. Verifique sua internet e tente novamente.', 'error');
+        } finally {
+            if (btn) {
+                btn.innerText = textoOriginal;
+                btn.disabled = false;
+            }
+        }
+    } else {
+        if (!isOnline) {
+            toast('Sem conexão com a internet', 'warning');
+        } else {
+            toast('Serviço de autenticação indisponível', 'error');
+        }
+        if (btn) { btn.innerText = textoOriginal; btn.disabled = false; }
+    }
+}
+
+// ✅ NOVA FUNÇÃO: Abre o cadastro com o email já preenchido
+function abrirCadastroComEmail(emailPreenchido) {
+    var html = '<div class="modal-handle"></div>';
+    html += '<div class="modal-title">📝 Criar Conta</div>';
+    html += '<div class="modal-sub">Preencha seus dados</div>';
+    
+    // Campo Nome
+    html += '<div class="form-group">';
+    html += '<label class="form-label">Nome *</label>';
+    html += '<input class="form-input" id="cadastro-nome" placeholder="Seu nome completo" onkeypress="if(event.key===\'Enter\')document.getElementById(\'cadastro-email\').focus()">';
+    html += '</div>';
+    
+    // Campo Email (JÁ PREENCHIDO)
+    html += '<div class="form-group">';
+    html += '<label class="form-label">E-mail *</label>';
+    html += '<input class="form-input" id="cadastro-email" type="email" value="' + escapeAttribute(emailPreenchido) + '" placeholder="seu@email.com" onkeypress="if(event.key===\'Enter\')document.getElementById(\'cadastro-senha\').focus()">';
+    html += '</div>';
+    
+    // Campo Senha
+    html += '<div class="form-group">';
+    html += '<label class="form-label">Senha *</label>';
+    html += '<input class="form-input" id="cadastro-senha" type="password" placeholder="Mínimo 6 caracteres" onkeypress="if(event.key===\'Enter\')document.getElementById(\'cadastro-senha2\').focus()">';
+    html += '</div>';
+    
+    // Confirmar Senha
+    html += '<div class="form-group">';
+    html += '<label class="form-label">Confirmar Senha *</label>';
+    html += '<input class="form-input" id="cadastro-senha2" type="password" placeholder="Repita a senha" onkeypress="if(event.key===\'Enter\')fazerCadastro()">';
+    html += '</div>';
+    
+    html += '<div style="background:var(--bg3);padding:12px;border-radius:8px;margin-bottom:16px;font-size:12px;color:var(--text2)">';
+    html += '💡 Dica: Use uma senha forte com pelo menos 6 caracteres';
+    html += '</div>';
+    
+    html += '<button class="btn btn-primary" onclick="fazerCadastro()">✅ Criar Conta</button>';
+    html += '<button class="btn btn-outline" onclick="abrirLogin()">Já tenho conta</button>';
+    html += '<button class="btn btn-outline" onclick="mostrarTelaSelecao()">Voltar</button>';
+    
+    document.getElementById('modal-body').innerHTML = html;
+    document.getElementById('modal-overlay').classList.add('show');
+    
+    // Foca no campo nome após abrir
+    setTimeout(function() { 
+        document.getElementById('cadastro-nome').focus(); 
+    }, 100);
+}
+
+async function loginSucesso(user, senhaIgnorada, lembrarMe) {
+    console.log('[AUTH] Login sucesso:', user.email);
+    
+    currentUser = user;
+    
+    try {
+        localStorage.setItem('kayla_user', JSON.stringify(user));
+        localStorage.setItem('kayla_email', user.email);
+        
+        // Senhas nunca são persistidas pelo aplicativo. A sessão é gerenciada
+        // pelo Supabase e o armazenamento legado é removido na autenticação.
+        localStorage.removeItem('kayla_senha_hash');
+        
+        if (lembrarMe) {
+            localStorage.setItem('kayla_lembrar_me', 'true');
+        }
+        
+        console.log('[AUTH] Sessão salva no localStorage');
+    } catch(e) {
+        console.error('[AUTH] Erro ao salvar sessão:', e);
+    }
+    
+    if (isOnline && supabaseClient) {
+        console.log('[AUTH] Carregando dados online...');
+        await carregarDados();
+    } else {
+        console.log('[AUTH] Carregando dados offline...');
+        carregarDadosLocais();
+    }
+
+    // Verifica se tem assinatura válida
+    await verificarStatusPro();
+    
+    // ✅ CORREÇÃO: Registrar dispositivo no login (resolve o problema do PRO sumir ao relogar)
+    if (isOnline && supabaseClient && typeof registrarDispositivoAtual === 'function') {
+        try {
+            console.log('[AUTH] Registrando dispositivo atual...');
+            await registrarDispositivoAtual();
+            // Re-verificar status após registrar o dispositivo
+            await verificarStatusPro();
+        } catch(e) {
+            console.warn('[AUTH] Erro ao registrar dispositivo:', e);
+        }
+    }
+    
+    fecharModal();
+    toast('Bem-vindo!', 'success');
+    mostrarApp();
+    atualizarBadgePlano();
+    
+    // ✅ NOVO: Verificar se voltou de um pagamento após o login
+    setTimeout(function() {
+        if (typeof verificarRetornoPagamento === 'function') {
+            verificarRetornoPagamento();
+        }
+    }, 1000);
+    
+    console.log('[AUTH] Login completo!');
+}
+
+async function fazerLogout() {
+    console.log('[AUTH] Logout iniciado');
+
+    // ✅ CORREÇÃO: zerar currentUser ANTES do signOut.
+    // Assim o evento SIGNED_OUT (config.js) NÃO roda o localStorage.clear()
+    // e a "impressão digital" do aparelho (que mantém o PRO) sobrevive ao logout.
+    currentUser = null;
+
+    if (supabaseClient && isOnline) {
+        try {
+            await supabaseClient.auth.signOut();
+        } catch(e) {
+            console.warn('[AUTH] Erro ao fazer logout no Supabase:', e);
+        }
+    }
+
+    // Limpar sessão (sem apagar a impressão digital do aparelho)
+    localStorage.removeItem('kayla_lembrar_me');
+    localStorage.removeItem('kayla_email');
+    localStorage.removeItem('kayla_user');
+    localStorage.removeItem('kayla_senha_hash');
+    localStorage.removeItem('perfilAcesso');
+
+    // Limpar status PRO local (será recalculado no próximo login)
+    if (typeof resetarStatusLocal === 'function') {
+        resetarStatusLocal();
+    } else {
+        localStorage.removeItem('kayla_pro');
+        localStorage.removeItem('kayla_pro_key');
+        localStorage.removeItem('kayla_pro_expires');
+        localStorage.removeItem('kayla_pro_devices');
+    }
+
+    clienteAtual = null;
+    pedidoItens = [];
+
+    toast('Logout realizado', 'success');
+
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+
+    console.log('[AUTH] Logout completo');
+}
+
+async function carregarDados() {
+    if (!currentUser) return;
+    if (isOnline && supabaseClient) {
+        try {
+            var userId = currentUser.id;
+            // Função de paginação: busca TUDO em blocos de 1000
+            async function buscarTudo(tabela, ordem) {
+                var todos = [], page = 0, tam = 1000;
+                while (true) {
+                    var r = await supabaseClient
+                        .from(tabela)
+                        .select('*')
+                        .eq('user_id', userId)
+                        .order(ordem.col, { ascending: ordem.asc })
+                        .range(page * tam, (page + 1) * tam - 1);
+                    if (r.error) { console.error('Erro ' + tabela + ':', r.error); break; }
+                    var dados = r.data || [];
+                    todos = todos.concat(dados);
+                    if (dados.length < tam) break;
+                    page++;
+                }
+                return todos;
+            }
+            clientes = await buscarTudo('clientes', { col: 'nome', asc: true });
+            produtos = await buscarTudo('produtos', { col: 'nome', asc: true });
+            pedidos  = await buscarTudo('pedidos',  { col: 'created_at', asc: false });
+            salvarDadosLocais();
+            lastSync = new Date().toISOString();
+            localStorage.setItem('kayla_last_sync', lastSync);
+        } catch(e) {
+            console.error('Erro ao sincronizar:', e);
+            carregarDadosLocais();
+        }
+    } else {
+        carregarDadosLocais();
+    }
+}
+
+async function sincronizarDados() {
+    if (!isOnline || !currentUser) return;
+    toast('🔄 Sincronizando...', 'warning');
+    await carregarDados();
+    toast('✅ Dados sincronizados!', 'success');
+}
+
+// ============ RECUPERAÇÃO DE SENHA ============
+
+function obterUrlRecuperacaoSenha() {
+    var caminho = window.location.pathname || '/app/';
+    var indiceApp = caminho.indexOf('/app/');
+    var base = indiceApp >= 0 ? caminho.slice(0, indiceApp + 5) : '/app/';
+    return window.location.origin + base + 'reset-password.html';
+}
+
+function recuperarSenha() {
+    var email = document.getElementById('email').value.trim();
+    
+    if (!email) {
+        toast('Digite seu e-mail', 'warning');
+        document.getElementById('email').focus();
+        return;
+    }
+    
+    var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        toast('E-mail inválido', 'error');
+        return;
+    }
+    
+    confirmar('Recuperar Senha', 'Será enviado um link de recuperação para:\n\n' + email + '\n\nDeseja continuar?', function(confirmed) {
+        if (!confirmed) return;
+        
+        (async function() {
+            try {
+                if (supabaseClient) {
+                    var result = await supabaseClient.auth.resetPasswordForEmail(email, {
+                        redirectTo: obterUrlRecuperacaoSenha()
+                    });
+                    
+                    if (result.error) {
+                        toast('Erro: ' + result.error.message, 'error');
+                    } else {
+                        toast('✅ E-mail de recuperação enviado!\n\nVerifique sua caixa de entrada e spam.', 'success');
+                        fecharModal();
+                    }
+                } else {
+                    toast('⚠️ Modo offline\n\nEm produção, o e-mail seria enviado para: ' + email, 'warning');
+                }
+            } catch(e) {
+                toast('Erro de conexão: ' + e.message, 'error');
+                console.error('Erro na recuperação:', e);
+            }
+        })();
+    });
+}
+
+console.log('✅ Auth.js carregado (Versão corrigida com verificação de pagamento e exclusão radical de conta)');
+
+// ============ FUNÇÕES DE EXCLUSÃO DE DADOS E CONTA ============
+
+async function apagarDadosUsuario() {
+    if (!currentUser) return;
+    
+    confirmar('⚠️ APAGAR TUDO (1/2)', 'Isso excluirá PERMANENTEMENTE todos os seus clientes, produtos e pedidos. Esta ação não pode ser desfeita. Deseja continuar?', function(confirmed) {
+        if (!confirmed) return;
+        
+        setTimeout(function() {
+            confirmar('🚨 CONFIRMAÇÃO FINAL (2/2)', 'VOCÊ TEM CERTEZA? Todos os seus dados de vendas, clientes e estoque serão perdidos para sempre.', async function(finalConfirmed) {
+                if (!finalConfirmed) return;
+                
+                toast('⏳ Apagando dados...', 'warning');
+                
+                try {
+                    if (isOnline && supabaseClient) {
+                        await supabaseClient.from('clientes').delete().eq('user_id', currentUser.id);
+                        await supabaseClient.from('produtos').delete().eq('user_id', currentUser.id);
+                        await supabaseClient.from('pedidos').delete().eq('user_id', currentUser.id);
+                    }
+                    
+                    clientes = [];
+                    produtos = [];
+                    pedidos = [];
+                    salvarDadosLocais();
+                    
+                    toast('✅ Todos os dados foram apagados.', 'success');
+                    if (typeof mudarAba === 'function') mudarAba('settings');
+                    
+                } catch(e) {
+                    toast('❌ Erro ao apagar dados.', 'error');
+                }
+            });
+        }, 500);
+    });
+}
+
+async function excluirContaUsuario() {
+    if (!currentUser) return;
+    
+    confirmar('🚫 EXCLUIR CONTA (1/2)', 'ATENÇÃO: Sua conta e todos os seus dados serão excluídos permanentemente. Se você tem uma assinatura PRO, ela será perdida. Deseja realmente excluir sua conta?', function(confirmed) {
+        if (!confirmed) return;
+        
+        setTimeout(function() {
+            confirmar('🚨 EXCLUSÃO PERMANENTE (2/2)', 'ÚLTIMO AVISO: Esta ação é IRREVERSÍVEL. Você perderá seu acesso e sua assinatura imediatamente. Confirmar exclusão definitiva?', async function(finalConfirmed) {
+                if (!finalConfirmed) return;
+                
+                toast('⏳ Excluindo conta...', 'warning');
+                
+                try {
+                    if (isOnline && supabaseClient) {
+                        var userId = currentUser.id;
+                        
+                        // 1. Chamar Edge Function para deletar TUDO (Auth + Tabelas restritas por RLS)
+                        // Como assinaturas e dispositivos têm RLS restrito a service_role para DELETE/UPDATE,
+                        // a Edge Function é o único lugar que pode realizar a limpeza completa com segurança.
+                        try {
+                            var response = await fetch(SUPABASE_EDGE_URL + '/delete-user', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': 'Bearer ' + SUPABASE_KEY
+                                },
+                                body: JSON.stringify({ 
+                                    user_id: userId,
+                                    clean_all_data: true // Sinaliza para a função apagar também as tabelas vinculadas
+                                })
+                            });
+                            
+                            if (!response.ok) {
+                                console.warn('Edge Function delete-user retornou erro:', response.status);
+                                
+                                // Fallback: Tentar apagar o que for possível via RLS de usuário (clientes, produtos, pedidos)
+                                await Promise.allSettled([
+                                    supabaseClient.from('clientes').delete().eq('user_id', userId),
+                                    supabaseClient.from('produtos').delete().eq('user_id', userId),
+                                    supabaseClient.from('pedidos').delete().eq('user_id', userId),
+                                    supabaseClient.from('pedido_itens').delete().eq('user_id', userId)
+                                ]);
+                            }
+                        } catch(e2) { 
+                            console.error('Erro ao chamar Edge Function delete-user:', e2);
+                        }
+                        
+                        // 3. Forçar logout no Supabase Auth (lado do cliente)
+                        await supabaseClient.auth.signOut();
+                    }
+                    
+                    // 4. Limpeza radical local
+                    localStorage.clear(); // Apaga TUDO do localStorage para este domínio
+                    
+                    toast('✅ Conta excluída com sucesso.', 'success');
+                    
+                    // Recarregar a página para limpar todo o estado da memória
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 1500);
+                    
+                } catch(e) {
+                    console.error('Erro crítico na exclusão:', e);
+                    toast('❌ Erro ao excluir conta.', 'error');
+                }
+            });
+        }, 500);
+    });
+}
